@@ -55,6 +55,7 @@ static sb_arg_t oltp_args[] =
   {"oltp-distinct-ranges", "number of distinct ranges", SB_ARG_TYPE_INT, "1"},
   {"oltp-index-updates", "number of index update", SB_ARG_TYPE_INT, "1"},
   {"oltp-non-index-updates", "number of non-index updates", SB_ARG_TYPE_INT, "1"},
+  {"oltp-conns-per-thread", "number of connections per thread", SB_ARG_TYPE_INT, "1"},
   {"oltp-nontrx-mode",
    "mode for non-transactional test {select, update_key, update_nokey, insert, delete}",
    SB_ARG_TYPE_STRING, "select"},
@@ -136,6 +137,7 @@ typedef struct
   unsigned int     distinct_ranges;
   unsigned int     index_updates;
   unsigned int     non_index_updates;
+  unsigned int     conns_per_thread;
   nontrx_mode_t    nontrx_mode;
   unsigned int     connect_delay;
   unsigned int     user_delay_min;
@@ -583,7 +585,7 @@ int oltp_init(void)
   }
   
   /* Allocate database connection pool */
-  connections = (db_conn_t **)malloc(sb_globals.num_threads * sizeof(db_conn_t *));
+  connections = (db_conn_t **)malloc(sb_globals.num_threads * sizeof(db_conn_t *) * args.conns_per_thread);
   if (connections == NULL)
   {
     log_text(LOG_FATAL, "failed to allocate DB connection pool!");
@@ -593,17 +595,20 @@ int oltp_init(void)
   /* Create database connections */
   for (thread_id = 0; thread_id < sb_globals.num_threads; thread_id++)
   {
-    connections[thread_id] = oltp_connect();
-    if (connections[thread_id] == NULL)
-    {
-      log_text(LOG_FATAL, "thread#%d: failed to connect to database server, aborting...",
-             thread_id);
-      return 1;
+    int j;
+    for (j=0; j<args.conns_per_thread; j++) {
+      connections[thread_id*args.conns_per_thread + j] = oltp_connect();
+      if (connections[thread_id*args.conns_per_thread + j] == NULL)
+      {
+        log_text(LOG_FATAL, "thread#%d: failed to connect to database server, aborting...",
+               thread_id);
+        return 1;
+      }
     }
   }
 
   /* Allocate statements pool */
-  statements = (oltp_stmt_set_t *)calloc(sb_globals.num_threads,
+  statements = (oltp_stmt_set_t *)calloc(sb_globals.num_threads * args.conns_per_thread,
                                           sizeof(oltp_stmt_set_t));
   if (statements == NULL)
   {
@@ -612,17 +617,20 @@ int oltp_init(void)
   }
   
   /* Allocate bind buffers for each thread */
-  bind_bufs = (oltp_bind_set_t *)calloc(sb_globals.num_threads,
+  bind_bufs = (oltp_bind_set_t *)calloc(sb_globals.num_threads * args.conns_per_thread,
                                         sizeof(oltp_bind_set_t));
   /* Prepare statements for each thread */
   for (thread_id = 0; thread_id < sb_globals.num_threads; thread_id++)
   {
-    if (prepare_stmt_set(statements + thread_id, bind_bufs + thread_id,
-                         connections[thread_id]))
+    int j=0;
+    for (j=0; j<args.conns_per_thread; j++) {
+    if (prepare_stmt_set(statements + thread_id * args.conns_per_thread + j , bind_bufs + thread_id * args.conns_per_thread + j,
+                         connections[thread_id*args.conns_per_thread + j]))
     {
       log_text(LOG_FATAL, "thread#%d: failed to prepare statements for test",
              thread_id);
       return 1;
+    }
     }
   }
 
@@ -665,8 +673,11 @@ int oltp_done(void)
   /* Close statements and database connections */
   for (thread_id = 0; thread_id < sb_globals.num_threads; thread_id++)
   {
-    close_stmt_set(statements + thread_id);
-    oltp_disconnect(connections[thread_id]);
+    int j;
+    for (j=0; j<args.conns_per_thread; j++) {
+      close_stmt_set(statements + thread_id * args.conns_per_thread + j);
+      oltp_disconnect(connections[thread_id * args.conns_per_thread + j]);
+    }
   }
 
   /* Deallocate connection pool */
@@ -1220,6 +1231,8 @@ int oltp_execute_request(sb_request_t *sb_req, int thread_id)
   /* measure the time for transaction */
   LOG_EVENT_START(msg, thread_id);
 
+	int j=rand()%args.conns_per_thread;
+
   do  /* deadlock handling */
   {
     retry = 0;
@@ -1241,7 +1254,7 @@ int oltp_execute_request(sb_request_t *sb_req, int thread_id)
         }
         
         /* find prepared statement */
-        stmt = get_sql_statement(query, thread_id);
+        stmt = get_sql_statement(query, thread_id * args.conns_per_thread + j);
         if (stmt == NULL)
         {
           log_text(LOG_FATAL, "unknown SQL query type: %d!", query->type);
@@ -1566,6 +1579,13 @@ int parse_arguments(void)
   args.distinct_ranges = sb_get_value_int("oltp-distinct-ranges");
   args.index_updates = sb_get_value_int("oltp-index-updates");
   args.non_index_updates = sb_get_value_int("oltp-non-index-updates");
+  args.conns_per_thread = sb_get_value_int("oltp-conns-per-thread");
+  if (args.conns_per_thread > 1) {
+    if (args.reconnect_mode != RECONNECT_SESSION) {
+      log_text(LOG_FATAL, "Invalid value for --oltp-reconnect-mode with --oltp-conns-per-thread. Only session is allowed");
+      return 1;
+    }
+  }
   s = sb_get_value_string("oltp-nontrx-mode");
   if (!strcmp(s, "select"))
     args.nontrx_mode = NONTRX_MODE_SELECT;

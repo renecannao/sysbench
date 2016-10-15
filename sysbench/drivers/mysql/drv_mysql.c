@@ -67,6 +67,7 @@ static sb_arg_t mysql_drv_args[] =
   {"mysql-engine-trx", "whether storage engine used is transactional or not {yes,no,auto}",
    SB_ARG_TYPE_STRING, "auto"},
   {"mysql-ssl", "use SSL connections, if available in the client library", SB_ARG_TYPE_FLAG, "off"},
+  {"mysql-compression", "use compression, if available in the client library", SB_ARG_TYPE_FLAG, "off"},
   {"myisam-max-rows", "max-rows parameter for MyISAM tables", SB_ARG_TYPE_INT, "1000000"},
   {"mysql-create-options", "additional options passed to CREATE TABLE", SB_ARG_TYPE_STRING, ""},
   
@@ -91,6 +92,7 @@ typedef struct
   unsigned int       myisam_max_rows;
   mysql_drv_trx_t    engine_trx;
   unsigned int       use_ssl;
+  unsigned char      use_compression;
   const char         *create_options;
 } mysql_drv_args_t;
 
@@ -237,6 +239,7 @@ int mysql_drv_init(void)
   args.db = sb_get_value_string("mysql-db");
   args.myisam_max_rows = sb_get_value_int("myisam-max-rows");
   args.use_ssl = sb_get_value_flag("mysql-ssl");
+  args.use_compression = sb_get_value_flag("mysql-compression");
   args.create_options = sb_get_value_string("mysql-create-options");
   if (args.create_options == NULL)
     args.create_options = "";
@@ -397,6 +400,11 @@ int mysql_drv_connect(db_conn_t *sb_conn)
           ssl_cert, ssl_ca);
     mysql_ssl_set(con, ssl_key, ssl_cert, ssl_ca, NULL, NULL);
   }
+  if (args.use_compression)
+	{
+		mysql_options(con,MYSQL_OPT_COMPRESS,NULL);
+	}
+
   
   DEBUG("mysql_real_connect(%p, \"%s\", \"%s\", \"%s\", \"%s\", %u, \"%s\", %s)",
         con,
